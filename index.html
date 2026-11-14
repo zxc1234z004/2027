@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>千人即時點名與單位區域戰情系統 (支援區域數字排序)</title>
+  <title>千人即時點名與單位區域戰情系統 (已連結 ikt-1000 雲端與試算表)</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -16,13 +16,14 @@
     const { useState, useEffect, useMemo, useRef } = React;
 
     // ==========================================
-    // 1. 系統設定區 (請填入你的 Firebase 網址與管理員密碼)
+    // 1. 系統設定區 (已直接填入你的 ikt-1000 Firebase 網址)
     // ==========================================
     const CONFIG = {
-      // 請貼上你的 Firebase Realtime Database 網址（結尾不要有斜線 /）
       FIREBASE_DB_URL: "https://ikt-1000-default-rtdb.asia-southeast1.firebasedatabase.app",
       EVENT_ID: "CHECKIN_2026_MAIN",
       ADMIN_PIN: "8888", // 管理員與幹部操作密碼
+      // 選填：若你有將上方 GAS 部署為網頁應用程式，將 exec 網址貼在這裡即可在網頁上一鍵觸發試算表更新
+      GAS_SYNC_URL: "https://script.google.com/macros/s/AKfycbzCXzWVrY7ztsmyf-NBOZ_fzDv45ijg63I6IP8VuEwVgxWSxaDahZ7xMWmmax8xEmOKFg/exec",
     };
 
     // 智慧型自然數字排序器（自動將 001區, 015區, 030區 由小到大排列）
@@ -32,14 +33,13 @@
       const sB = String(bStr).trim();
       const numA = sA.match(/\d+/);
       const numB = sB.match(/\d+/);
-      // 若兩者皆包含數字（例如 "015區" 與 "001區"），直接比對數值大小 (1 < 15 < 30)
       if (numA && numB && Number(numA[0]) !== Number(numB[0])) {
         return Number(numA[0]) - Number(numB[0]);
       }
       return naturalCollator.compare(sA, sB);
     };
 
-    // 預設測試名單（故意將區域順序打亂為 030區, 015區, 001區，驗證系統自動由小到大排序）
+    // 預設測試名單（當雲端尚未匯入正式 CSV 時顯示）
     const generateDefaultRoster = () => {
       const unitRegions = {
         "正和單位": ["030區", "015區", "001區", "002區"],
@@ -68,7 +68,6 @@
       return roster;
     };
 
-    // 性別標準化判斷
     const isMaleGender = (g) => ["乾", "乾道", "男", "M", "male", "童"].includes(String(g).trim());
     const isFemaleGender = (g) => ["坤", "坤道", "女", "F", "female"].includes(String(g).trim());
 
@@ -78,7 +77,6 @@
 
       const [view, setView] = useState(isCheckinOnly ? "checkin" : "dashboard");
 
-      // 管理員權限狀態
       const [isAdminUnlocked, setIsAdminUnlocked] = useState(() => {
         return sessionStorage.getItem("ADMIN_UNLOCKED") === "true";
       });
@@ -86,27 +84,23 @@
       const [pinInput, setPinInput] = useState("");
       const pendingActionRef = useRef(null);
 
-      // 應到名單母體與雲端載入狀態
       const [roster, setRoster] = useState(() => {
         const saved = localStorage.getItem(`ROSTER_${CONFIG.EVENT_ID}`);
         return saved ? JSON.parse(saved) : generateDefaultRoster();
       });
-      const [rosterSyncStatus, setRosterSyncStatus] = useState("載入中...");
+      const [rosterSyncStatus, setRosterSyncStatus] = useState("連線 ikt-1000 中...");
 
-      // 已簽到紀錄
       const [checkins, setCheckins] = useState(() => {
         const saved = localStorage.getItem(`CHECKINS_${CONFIG.EVENT_ID}`);
         return saved ? JSON.parse(saved) : {};
       });
 
-      // 點名端狀態
       const [queryInput, setQueryInput] = useState("");
       const [matchedCandidates, setMatchedCandidates] = useState([]);
       const [selectedMember, setSelectedMember] = useState(null);
       const [checkinState, setCheckinState] = useState("idle");
       const [receipt, setReceipt] = useState(null);
 
-      // 戰情室篩選狀態
       const [selectedUnit, setSelectedUnit] = useState("ALL");
       const [selectedRegion, setSelectedRegion] = useState("ALL");
       const [genderFilter, setGenderFilter] = useState("ALL");
@@ -114,12 +108,11 @@
       const [searchKeyword, setSearchKeyword] = useState("");
       const [isSimulating, setIsSimulating] = useState(false);
       const [isUploadingRoster, setIsUploadingRoster] = useState(false);
+      const [isSyncingSheet, setIsSyncingSheet] = useState(false);
 
       const fileInputRef = useRef(null);
 
-      // ==========================================
-      // 2. 管理員密碼保護攔截器
-      // ==========================================
+      // 管理員密碼驗證攔截
       const requireAdmin = (actionCallback) => {
         if (isAdminUnlocked) {
           actionCallback();
@@ -152,14 +145,9 @@
         sessionStorage.removeItem("ADMIN_UNLOCKED");
       };
 
-      // ==========================================
-      // 3. 雲端母體名單拉取 + 簽到狀態 SSE 即時推播
-      // ==========================================
+      // 連線 ikt-1000 Firebase 拉取雲端名單與即時監聽簽到
       useEffect(() => {
-        if (!CONFIG.FIREBASE_DB_URL) {
-          setRosterSyncStatus("本機模擬名單");
-          return;
-        }
+        if (!CONFIG.FIREBASE_DB_URL) return;
 
         const rosterUrl = `${CONFIG.FIREBASE_DB_URL}/rosters/${CONFIG.EVENT_ID}.json`;
         fetch(rosterUrl)
@@ -170,12 +158,12 @@
               localStorage.setItem(`ROSTER_${CONFIG.EVENT_ID}`, JSON.stringify(cloudRoster));
               setRosterSyncStatus(`已同步雲端名單 (${cloudRoster.length}人)`);
             } else {
-              setRosterSyncStatus("尚未上傳雲端名單 (目前顯示預設名單)");
+              setRosterSyncStatus("雲端尚無名單 (請點匯入CSV或從試算表推送)");
             }
           })
           .catch(err => {
-            console.error("雲端名單讀取失敗，改用本地快取:", err);
-            setRosterSyncStatus("使用手機快取名單");
+            console.error("雲端名單讀取失敗:", err);
+            setRosterSyncStatus("讀取失敗 (請確認 Firebase Rules 已設為 true)");
           });
 
         const checkinsUrl = `${CONFIG.FIREBASE_DB_URL}/checkins/${CONFIG.EVENT_ID}.json`;
@@ -211,12 +199,9 @@
         localStorage.setItem(`CHECKINS_${CONFIG.EVENT_ID}`, JSON.stringify(checkins));
       }, [checkins]);
 
-      // ==========================================
-      // 4. 高併發不掉單寫入核心
-      // ==========================================
+      // 高併發不掉單寫入核心
       const submitCheckin = async (memberId, status = "present", method = "self") => {
         const record = { status, time: Date.now(), method };
-
         localStorage.setItem(`MY_RECEIPT_${memberId}`, JSON.stringify(record));
 
         if (!CONFIG.FIREBASE_DB_URL) {
@@ -244,9 +229,7 @@
         throw new Error("網路忙碌，已保存本地簽到憑證");
       };
 
-      // ==========================================
-      // 5. 匯入 CSV 並自動同步至 Firebase 雲端母體名單
-      // ==========================================
+      // 匯入 CSV 並自動同步至 ikt-1000 雲端母體名單
       const handleImportCSV = (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -274,7 +257,6 @@
 
           if (imported.length === 0) return;
 
-          // 匯入時即預先按「區域數字由小到大 -> 編號由小到大」排好
           imported.sort((a, b) => {
             const rDiff = sortByNumberAsc(a.region, b.region);
             if (rDiff !== 0) return rDiff;
@@ -290,7 +272,7 @@
 
           if (CONFIG.FIREBASE_DB_URL) {
             setIsUploadingRoster(true);
-            setRosterSyncStatus("正在上傳名單至雲端...");
+            setRosterSyncStatus("正在上傳名單至 ikt-1000...");
             try {
               const res = await fetch(`${CONFIG.FIREBASE_DB_URL}/rosters/${CONFIG.EVENT_ID}.json`, {
                 method: "PUT",
@@ -299,31 +281,48 @@
               });
               if (res.ok) {
                 setRosterSyncStatus(`已同步雲端名單 (${imported.length}人)`);
-                alert(`✅ 成功匯入 ${imported.length} 筆名單（已自動依區域數字由小到大排序），並已同步至 Firebase 雲端！`);
+                alert(`✅ 成功匯入 ${imported.length} 筆名單至 ikt-1000 雲端資料庫！\n試算表端點選「立即從 Firebase 同步」即可自動建立對應總表。`);
               } else {
                 throw new Error("HTTP " + res.status);
               }
             } catch (err) {
               console.error("雲端名單上傳失敗:", err);
-              setRosterSyncStatus("雲端上傳失敗 (僅儲存於本機)");
-              alert(`⚠️ 名單已載入本機，但上傳至 Firebase 失敗，請確認 Firebase Rules 是否已開放 /rosters 寫入權限！`);
+              setRosterSyncStatus("雲端上傳失敗 (請檢查 Firebase Rules)");
+              alert(`⚠️ 上傳至 ikt-1000 失敗，請確認 Firebase Realtime Database 的「規則 (Rules)」已將 .read 與 .write 設為 true！`);
             } finally {
               setIsUploadingRoster(false);
             }
-          } else {
-            alert(`✅ 成功於本機模擬模式匯入 ${imported.length} 筆名單（已自動依區域數字由小到大排序）！`);
           }
         };
         reader.readAsText(file, "UTF-8");
         e.target.value = "";
       };
 
-      // ==========================================
-      // 6. 清空雲端與本機所有簽到紀錄
-      // ==========================================
+      // 手動觸發同步至 Google 試算表 (若已填寫 GAS_SYNC_URL)
+      const handleTriggerSheetSync = async () => {
+        if (!CONFIG.GAS_SYNC_URL) {
+          alert("💡 你可以在 Google 試算表上方選單點擊「⚡ 千人點名同步系統 -> 立即從 Firebase 同步最新簽到狀況」或開啟「每 1 分鐘背景自動同步」！\n\n（若想從此按鈕直接觸發，請將 GAS 部署網址填入程式碼第 25 行的 GAS_SYNC_URL）");
+          return;
+        }
+        setIsSyncingSheet(true);
+        try {
+          await fetch(CONFIG.GAS_SYNC_URL, {
+            method: "POST",
+            mode: "no-cors",
+            body: JSON.stringify({ action: "sync" })
+          });
+          alert("✅ 已發送同步指令至 Google 試算表！");
+        } catch (err) {
+          alert("⚠️ 觸發試算表同步失敗，請直接在試算表內點選同步選單。");
+        } finally {
+          setIsSyncingSheet(false);
+        }
+      };
+
+      // 清空雲端與本機所有簽到紀錄
       const handleClearAllCheckins = () => {
         requireAdmin(async () => {
-          if (!confirm("⚠️ 確定要【清空全場所有已簽到紀錄】嗎？此動作會同步清除雲端資料且無法復原！")) return;
+          if (!confirm("⚠️ 確定要【清空全場所有已簽到紀錄】嗎？此動作會同步清除 ikt-1000 雲端資料且無法復原！")) return;
 
           setCheckins({});
           localStorage.removeItem(`CHECKINS_${CONFIG.EVENT_ID}`);
@@ -334,7 +333,7 @@
                 method: "DELETE"
               });
               if (res.ok) {
-                alert("✅ 已成功清空雲端與本機的所有簽到紀錄！");
+                alert("✅ 已成功清空 ikt-1000 雲端與本機的所有簽到紀錄！");
               } else {
                 alert("⚠️ 雲端清空失敗，請檢查 Firebase Rules 權限。");
               }
@@ -373,7 +372,6 @@
         }
       };
 
-      // 參加者確認送出點名
       const handleConfirmCheckin = async (e) => {
         e.preventDefault();
         const target = selectedMember || matchedCandidates[0];
@@ -392,39 +390,7 @@
         }
       };
 
-      // 模擬千人瞬間點名壓力測試
-      const runConcurrencyTest = () => {
-        requireAdmin(() => {
-          if (isSimulating) return;
-          setIsSimulating(true);
-          let rounds = 0;
-          const timer = setInterval(() => {
-            rounds++;
-            setCheckins(prev => {
-              const next = { ...prev };
-              for (let i = 0; i < 75; i++) {
-                const p = roster[Math.floor(Math.random() * roster.length)];
-                if (p && !next[p.memberId]) {
-                  next[p.memberId] = {
-                    status: Math.random() > 0.95 ? "leave" : "present",
-                    time: Date.now(),
-                    method: "sim"
-                  };
-                }
-              }
-              return next;
-            });
-            if (rounds >= 14) {
-              clearInterval(timer);
-              setIsSimulating(false);
-            }
-          }, 80);
-        });
-      };
-
-      // ==========================================
-      // 7. 即時三維度統計聚合 (支援單位與區域數字由小到大排序)
-      // ==========================================
+      // 即時三維度統計聚合 (單位 -> 區域按數字小到大 -> 乾坤性別)
       const stats = useMemo(() => {
         const unitMap = {};
         const regionMap = {};
@@ -444,7 +410,6 @@
           if (isM) { maleTotal++; if (isPresent) malePresent++; }
           if (isF) { femaleTotal++; if (isPresent) femalePresent++; }
 
-          // 1. 第一層：單位統計
           if (!unitMap[p.unit]) {
             unitMap[p.unit] = {
               name: p.unit,
@@ -460,7 +425,6 @@
           if (isM) { u.maleTotal++; if (isPresent) u.malePresent++; }
           if (isF) { u.femaleTotal++; if (isPresent) u.femalePresent++; }
 
-          // 2. 第二層：區域統計 (隨第一層所選「單位」動態連動)
           if (selectedUnit === "ALL" || p.unit === selectedUnit) {
             const regionKey = `${p.unit}_${p.region}`;
             if (!regionMap[regionKey]) {
@@ -482,10 +446,7 @@
           }
         });
 
-        // 單位卡片排序
         const sortedUnits = Object.values(unitMap).sort((a, b) => sortByNumberAsc(a.name, b.name));
-
-        // 區域卡片排序：優先按「區域數字由小到大 (001區 -> 015區 -> 030區)」排序
         const sortedRegions = Object.values(regionMap).sort((a, b) => {
           const regionCompare = sortByNumberAsc(a.name, b.name);
           if (regionCompare !== 0) return regionCompare;
@@ -505,7 +466,6 @@
         };
       }, [roster, checkins, selectedUnit]);
 
-      // 戰情室人員明細過濾 + 依「區域數字由小到大 -> 編號由小到大」自動排序
       const filteredList = useMemo(() => {
         const list = roster.filter(p => {
           if (selectedUnit !== "ALL" && p.unit !== selectedUnit) return false;
@@ -540,7 +500,6 @@
         });
       }, [roster, checkins, selectedUnit, selectedRegion, genderFilter, statusFilter, searchKeyword]);
 
-      // 下載 CSV 範本或匯出即時點名結果（匯出時亦按區域數字由小到大排序）
       const exportCSV = (isTemplate = false) => {
         if (isTemplate) {
           const sample = "\uFEFFmemberId,性別,編號,求道名,單位,區域\nM0001,乾,A001,王大明,正和單位,015區\nM0002,坤,A002,林淑芬,正和單位,030區\nM0003,乾,B001,陳建宏,正和單位,001區";
@@ -606,7 +565,7 @@
                   </button>
                 </div>
                 <p className="text-xs text-slate-400">
-                  匯入雲端名單、清空簽到紀錄與幹部代簽功能受密碼保護，解鎖後於本分頁期間持續有效。
+                  匯入雲端名單、清空簽到紀錄與幹部代簽功能受密碼保護（預設 8888）。
                 </p>
                 <input
                   type="password"
@@ -644,8 +603,8 @@
                 <h1 className="text-lg font-bold text-white tracking-wide">
                   千人即時點名與單位區域戰情系統
                 </h1>
-                <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
-                  {CONFIG.FIREBASE_DB_URL ? "🟢 雲端即時連線" : "🟡 本機模擬模式"} ｜ {rosterSyncStatus}
+                <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-emerald-300 border border-slate-700">
+                  🟢 已連結 ikt-1000 雲端 ｜ {rosterSyncStatus}
                 </span>
               </div>
 
@@ -692,12 +651,9 @@
             </div>
           </header>
 
-          {/* ========================================== */}
-          {/* 視角 A：即時戰情室 (第一層：分單位 -> 第二層：分區域(按數字小到大) -> 乾坤統計) */}
-          {/* ========================================== */}
+          {/* 視角 A：即時戰情室 */}
           {view === "dashboard" && (
             <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 space-y-6">
-              {/* 頂部全場關鍵指標卡片 */}
               <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
                 <div
                   onClick={() => { setStatusFilter("ALL"); setGenderFilter("ALL"); }}
@@ -753,11 +709,11 @@
 
                 <div className="col-span-2 lg:col-span-1 bg-slate-800/90 border border-slate-700 rounded-xl p-3 flex flex-col justify-between gap-2">
                   <button
-                    onClick={runConcurrencyTest}
-                    disabled={isSimulating}
-                    className="w-full py-2 px-3 rounded-lg bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-semibold text-xs shadow transition disabled:opacity-50"
+                    onClick={handleTriggerSheetSync}
+                    disabled={isSyncingSheet}
+                    className="w-full py-2 px-3 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow transition disabled:opacity-50"
                   >
-                    {isSimulating ? "⚡ 千人寫入中..." : "⚡ 模擬千人同時點名"}
+                    {isSyncingSheet ? "🔄 同步至試算表中..." : "🔄 立即同步至試算表"}
                   </button>
                   <div className="grid grid-cols-2 gap-1.5">
                     <button
@@ -765,11 +721,11 @@
                       disabled={isUploadingRoster}
                       className="py-1.5 px-2 rounded bg-indigo-700 hover:bg-indigo-600 text-xs text-white font-medium text-center transition disabled:opacity-50"
                     >
-                      {isUploadingRoster ? "上傳雲端中..." : "🔒 匯入名單 CSV"}
+                      {isUploadingRoster ? "上傳中..." : "🔒 匯入名單 CSV"}
                     </button>
                     <button
                       onClick={() => exportCSV(false)}
-                      className="py-1.5 px-2 rounded bg-emerald-700 hover:bg-emerald-600 text-xs text-white font-medium transition"
+                      className="py-1.5 px-2 rounded bg-sky-700 hover:bg-sky-600 text-xs text-white font-medium transition"
                     >
                       匯出結果 CSV
                     </button>
@@ -789,7 +745,7 @@
                 </div>
               </div>
 
-              {/* 第一層：各「單位」即時出席率與乾坤分佈卡片 */}
+              {/* 第一層：各「單位」即時出席率 */}
               <section>
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                   <div className="flex items-center gap-2">
@@ -869,7 +825,7 @@
                 </div>
               </section>
 
-              {/* 第二層：各「區域」即時紅綠燈矩陣 (已按數字由小到大 001區 -> 015區 -> 030區 自動排序) */}
+              {/* 第二層：各「區域」即時紅綠燈矩陣 (按數字由小到大排序) */}
               <section>
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                   <div className="flex items-center gap-2">
@@ -953,7 +909,7 @@
                 </div>
               </section>
 
-              {/* 第三層：6 欄人員明細與幹部快速代簽台 */}
+              {/* 第三層：人員明細與幹部快速代簽台 */}
               <section className="bg-slate-800/80 border border-slate-700 rounded-xl p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                   <div className="flex flex-wrap items-center gap-2">
@@ -1077,19 +1033,12 @@
                       })}
                     </tbody>
                   </table>
-                  {filteredList.length > 120 && (
-                    <div className="text-center text-xs text-slate-400 py-3">
-                      目前顯示前 120 筆，可點擊上方「單位 / 區域卡片」或輸入關鍵字快速過濾
-                    </div>
-                  )}
                 </div>
               </section>
             </main>
           )}
 
-          {/* ========================================== */}
           {/* 視角 B：參加者手機快速簽到端 */}
-          {/* ========================================== */}
           {view === "checkin" && (
             <main className="flex-1 flex items-center justify-center p-4">
               <div className="max-w-md w-full bg-slate-800 border border-slate-700 rounded-2xl p-6 shadow-2xl">
@@ -1104,7 +1053,7 @@
 
                     <div>
                       <label className="block text-xs text-slate-300 mb-1.5">
-                        搜尋編號或求道名 (目前名單共 {roster.length} 人)
+                        搜尋編號或求道名 (目前雲端名單共 {roster.length} 人)
                       </label>
                       <input
                         type="text"
