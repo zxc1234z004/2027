@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>千人即時點名與單位區域戰情系統 (雲端名單同步版)</title>
+  <title>千人即時點名與單位區域戰情系統 (支援區域數字排序)</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -22,16 +22,30 @@
       // 請貼上你的 Firebase Realtime Database 網址（結尾不要有斜線 /）
       FIREBASE_DB_URL: "https://ikt-1000-default-rtdb.asia-southeast1.firebasedatabase.app",
       EVENT_ID: "CHECKIN_2026_MAIN",
-      ADMIN_PIN: "8888", // 管理員與幹部操作密碼（可自行修改）
+      ADMIN_PIN: "8888", // 管理員與幹部操作密碼
     };
 
-    // 預設測試名單（當雲端尚未上傳任何 CSV 名單時的備用資料）
+    // 智慧型自然數字排序器（自動將 001區, 015區, 030區 由小到大排列）
+    const naturalCollator = new Intl.Collator("zh-Hant", { numeric: true, sensitivity: "base" });
+    const sortByNumberAsc = (aStr = "", bStr = "") => {
+      const sA = String(aStr).trim();
+      const sB = String(bStr).trim();
+      const numA = sA.match(/\d+/);
+      const numB = sB.match(/\d+/);
+      // 若兩者皆包含數字（例如 "015區" 與 "001區"），直接比對數值大小 (1 < 15 < 30)
+      if (numA && numB && Number(numA[0]) !== Number(numB[0])) {
+        return Number(numA[0]) - Number(numB[0]);
+      }
+      return naturalCollator.compare(sA, sB);
+    };
+
+    // 預設測試名單（故意將區域順序打亂為 030區, 015區, 001區，驗證系統自動由小到大排序）
     const generateDefaultRoster = () => {
       const unitRegions = {
-        "正和單位": ["中一區", "中二區", "中三區"],
-        "崇正單位": ["屯一區", "屯二區", "屯三區"],
-        "明善單位": ["山一區", "山二區", "豐原區"],
-        "慈光單位": ["海一區", "海二區", "南一區"]
+        "正和單位": ["030區", "015區", "001區", "002區"],
+        "崇正單位": ["025區", "005區", "012區", "003區"],
+        "明善單位": ["040區", "008區", "020區", "010區"],
+        "慈光單位": ["050區", "018區", "006區", "033區"]
       };
       const units = Object.keys(unitRegions);
       const genders = ["乾", "坤"];
@@ -45,7 +59,7 @@
         roster.push({
           memberId: `M${String(i).padStart(4, "0")}`,
           gender,
-          code: `${unit.slice(0, 1)}${String(i).padStart(3, "0")}`,
+          code: `${String(i).padStart(4, "0")}`,
           name: `道親_${i}`,
           unit,
           region
@@ -64,7 +78,7 @@
 
       const [view, setView] = useState(isCheckinOnly ? "checkin" : "dashboard");
 
-      // 管理員權限狀態 (存在 sessionStorage，關閉分頁即自動上鎖)
+      // 管理員權限狀態
       const [isAdminUnlocked, setIsAdminUnlocked] = useState(() => {
         return sessionStorage.getItem("ADMIN_UNLOCKED") === "true";
       });
@@ -79,7 +93,7 @@
       });
       const [rosterSyncStatus, setRosterSyncStatus] = useState("載入中...");
 
-      // 已簽到紀錄: { [memberId]: { status: 'present' | 'leave', time: 1700000000, method: 'self' | 'admin' } }
+      // 已簽到紀錄
       const [checkins, setCheckins] = useState(() => {
         const saved = localStorage.getItem(`CHECKINS_${CONFIG.EVENT_ID}`);
         return saved ? JSON.parse(saved) : {};
@@ -89,10 +103,10 @@
       const [queryInput, setQueryInput] = useState("");
       const [matchedCandidates, setMatchedCandidates] = useState([]);
       const [selectedMember, setSelectedMember] = useState(null);
-      const [checkinState, setCheckinState] = useState("idle"); // idle | sending | retrying | success
+      const [checkinState, setCheckinState] = useState("idle");
       const [receipt, setReceipt] = useState(null);
 
-      // 戰情室篩選狀態 (第一層：單位 selectedUnit，第二層：區域 selectedRegion)
+      // 戰情室篩選狀態
       const [selectedUnit, setSelectedUnit] = useState("ALL");
       const [selectedRegion, setSelectedRegion] = useState("ALL");
       const [genderFilter, setGenderFilter] = useState("ALL");
@@ -147,7 +161,6 @@
           return;
         }
 
-        // A. 自動從 Firebase 拉取最新上傳的應到母體名單 (/rosters/{EVENT_ID})
         const rosterUrl = `${CONFIG.FIREBASE_DB_URL}/rosters/${CONFIG.EVENT_ID}.json`;
         fetch(rosterUrl)
           .then(r => r.json())
@@ -165,7 +178,6 @@
             setRosterSyncStatus("使用手機快取名單");
           });
 
-        // B. 監聽即時簽到狀態與雲端名單異動
         const checkinsUrl = `${CONFIG.FIREBASE_DB_URL}/checkins/${CONFIG.EVENT_ID}.json`;
         const es = new EventSource(checkinsUrl);
 
@@ -177,7 +189,6 @@
         es.addEventListener("put", (e) => {
           const payload = JSON.parse(e.data);
           if (payload.path === "/") {
-            // 若管理員在雲端清空紀錄，payload.data 為 null，所有看板立即歸零
             setCheckins(payload.data || {});
           } else {
             const memberId = payload.path.replace("/", "");
@@ -196,13 +207,12 @@
         return () => es.close();
       }, []);
 
-      // 本機持久化備份
       useEffect(() => {
         localStorage.setItem(`CHECKINS_${CONFIG.EVENT_ID}`, JSON.stringify(checkins));
       }, [checkins]);
 
       // ==========================================
-      // 4. 高併發不掉單寫入核心 (以 memberId 為唯一鍵 PUT 寫入)
+      // 4. 高併發不掉單寫入核心
       // ==========================================
       const submitCheckin = async (memberId, status = "present", method = "self") => {
         const record = { status, time: Date.now(), method };
@@ -264,13 +274,20 @@
 
           if (imported.length === 0) return;
 
-          // 先更新本地狀態
+          // 匯入時即預先按「區域數字由小到大 -> 編號由小到大」排好
+          imported.sort((a, b) => {
+            const rDiff = sortByNumberAsc(a.region, b.region);
+            if (rDiff !== 0) return rDiff;
+            const uDiff = sortByNumberAsc(a.unit, b.unit);
+            if (uDiff !== 0) return uDiff;
+            return sortByNumberAsc(a.code, b.code);
+          });
+
           setRoster(imported);
           localStorage.setItem(`ROSTER_${CONFIG.EVENT_ID}`, JSON.stringify(imported));
           setSelectedUnit("ALL");
           setSelectedRegion("ALL");
 
-          // 若已設定 Firebase，直接整批上傳至 /rosters/{EVENT_ID}.json 供全場手機讀取
           if (CONFIG.FIREBASE_DB_URL) {
             setIsUploadingRoster(true);
             setRosterSyncStatus("正在上傳名單至雲端...");
@@ -282,7 +299,7 @@
               });
               if (res.ok) {
                 setRosterSyncStatus(`已同步雲端名單 (${imported.length}人)`);
-                alert(`✅ 成功匯入 ${imported.length} 筆名單，並已同步至 Firebase 雲端！\n現在所有參加者打開手機網頁即可直接搜尋最新名單。`);
+                alert(`✅ 成功匯入 ${imported.length} 筆名單（已自動依區域數字由小到大排序），並已同步至 Firebase 雲端！`);
               } else {
                 throw new Error("HTTP " + res.status);
               }
@@ -294,7 +311,7 @@
               setIsUploadingRoster(false);
             }
           } else {
-            alert(`✅ 成功於本機模擬模式匯入 ${imported.length} 筆名單！（填入 FIREBASE_DB_URL 後即可同步給全場手機）`);
+            alert(`✅ 成功於本機模擬模式匯入 ${imported.length} 筆名單（已自動依區域數字由小到大排序）！`);
           }
         };
         reader.readAsText(file, "UTF-8");
@@ -302,7 +319,7 @@
       };
 
       // ==========================================
-      // 6. 清空雲端與本機所有簽到紀錄 (需管理員權限)
+      // 6. 清空雲端與本機所有簽到紀錄
       // ==========================================
       const handleClearAllCheckins = () => {
         requireAdmin(async () => {
@@ -328,7 +345,7 @@
         });
       };
 
-      // 參加者輸入搜尋 (支援 編號 / 求道名 / memberId)
+      // 參加者輸入搜尋
       const handleSearchMember = (val) => {
         setQueryInput(val);
         setSelectedMember(null);
@@ -337,11 +354,15 @@
           setMatchedCandidates([]);
           return;
         }
-        const matches = roster.filter(m =>
-          m.memberId.toLowerCase().includes(q) ||
-          m.code.toLowerCase().includes(q) ||
-          m.name.toLowerCase().includes(q)
-        ).slice(0, 8);
+        const matches = roster
+          .filter(m =>
+            m.memberId.toLowerCase().includes(q) ||
+            m.code.toLowerCase().includes(q) ||
+            m.name.toLowerCase().includes(q)
+          )
+          .sort((a, b) => sortByNumberAsc(a.region, b.region))
+          .slice(0, 8);
+
         setMatchedCandidates(matches);
         if (matches.length === 1 && (
           matches[0].memberId.toLowerCase() === q ||
@@ -371,7 +392,7 @@
         }
       };
 
-      // 模擬千人瞬間點名壓力測試 (需管理員解鎖)
+      // 模擬千人瞬間點名壓力測試
       const runConcurrencyTest = () => {
         requireAdmin(() => {
           if (isSimulating) return;
@@ -402,7 +423,7 @@
       };
 
       // ==========================================
-      // 7. 即時三維度統計聚合 (第一層：單位 -> 第二層：區域 -> 乾坤性別)
+      // 7. 即時三維度統計聚合 (支援單位與區域數字由小到大排序)
       // ==========================================
       const stats = useMemo(() => {
         const unitMap = {};
@@ -461,6 +482,16 @@
           }
         });
 
+        // 單位卡片排序
+        const sortedUnits = Object.values(unitMap).sort((a, b) => sortByNumberAsc(a.name, b.name));
+
+        // 區域卡片排序：優先按「區域數字由小到大 (001區 -> 015區 -> 030區)」排序
+        const sortedRegions = Object.values(regionMap).sort((a, b) => {
+          const regionCompare = sortByNumberAsc(a.name, b.name);
+          if (regionCompare !== 0) return regionCompare;
+          return sortByNumberAsc(a.unit, b.unit);
+        });
+
         return {
           total: roster.length,
           present: totalPresent,
@@ -469,14 +500,14 @@
           rate: roster.length ? ((totalPresent / roster.length) * 100).toFixed(1) : "0.0",
           maleTotal, malePresent,
           femaleTotal, femalePresent,
-          units: Object.values(unitMap),
-          regions: Object.values(regionMap)
+          units: sortedUnits,
+          regions: sortedRegions
         };
       }, [roster, checkins, selectedUnit]);
 
-      // 戰情室人員明細過濾
+      // 戰情室人員明細過濾 + 依「區域數字由小到大 -> 編號由小到大」自動排序
       const filteredList = useMemo(() => {
-        return roster.filter(p => {
+        const list = roster.filter(p => {
           if (selectedUnit !== "ALL" && p.unit !== selectedUnit) return false;
           if (selectedRegion !== "ALL" && p.region !== selectedRegion) return false;
           if (genderFilter === "MALE" && !isMaleGender(p.gender)) return false;
@@ -499,12 +530,20 @@
           }
           return true;
         });
+
+        return list.sort((a, b) => {
+          const rDiff = sortByNumberAsc(a.region, b.region);
+          if (rDiff !== 0) return rDiff;
+          const uDiff = sortByNumberAsc(a.unit, b.unit);
+          if (uDiff !== 0) return uDiff;
+          return sortByNumberAsc(a.code, b.code);
+        });
       }, [roster, checkins, selectedUnit, selectedRegion, genderFilter, statusFilter, searchKeyword]);
 
-      // 下載 CSV 範本或匯出即時點名結果
+      // 下載 CSV 範本或匯出即時點名結果（匯出時亦按區域數字由小到大排序）
       const exportCSV = (isTemplate = false) => {
         if (isTemplate) {
-          const sample = "\uFEFFmemberId,性別,編號,求道名,單位,區域\nM0001,乾,A001,王大明,正和單位,中一區\nM0002,坤,A002,林淑芬,正和單位,中二區\nM0003,乾,B001,陳建宏,崇正單位,屯一區";
+          const sample = "\uFEFFmemberId,性別,編號,求道名,單位,區域\nM0001,乾,A001,王大明,正和單位,015區\nM0002,坤,A002,林淑芬,正和單位,030區\nM0003,乾,B001,陳建宏,正和單位,001區";
           const blob = new Blob([sample], { type: "text/csv;charset=utf-8;" });
           const a = document.createElement("a");
           a.href = URL.createObjectURL(blob);
@@ -514,7 +553,15 @@
         }
 
         const headers = ["memberId", "性別", "編號", "求道名", "單位", "區域", "出席狀態", "簽到時間", "簽到方式"];
-        const rows = roster.map(p => {
+        const sortedRoster = [...roster].sort((a, b) => {
+          const rDiff = sortByNumberAsc(a.region, b.region);
+          if (rDiff !== 0) return rDiff;
+          const uDiff = sortByNumberAsc(a.unit, b.unit);
+          if (uDiff !== 0) return uDiff;
+          return sortByNumberAsc(a.code, b.code);
+        });
+
+        const rows = sortedRoster.map(p => {
           const c = checkins[p.memberId];
           const stText = c?.status === "present" ? "已出席" : c?.status === "leave" ? "請假" : "未到";
           const tText = c?.time ? new Date(c.time).toLocaleTimeString("zh-TW", { hour12: false }) : "-";
@@ -531,7 +578,6 @@
 
       return (
         <div className="min-h-screen flex flex-col">
-          {/* 隱藏的 CSV 檔案選取器 (受管理員密碼保護觸發) */}
           <input
             ref={fileInputRef}
             type="file"
@@ -605,7 +651,6 @@
 
               {!isCheckinOnly && (
                 <div className="flex items-center gap-2">
-                  {/* 管理員鎖頭狀態按鈕 */}
                   {isAdminUnlocked ? (
                     <button
                       onClick={handleLockAdmin}
@@ -648,7 +693,7 @@
           </header>
 
           {/* ========================================== */}
-          {/* 視角 A：即時戰情室 (第一層：分單位 -> 第二層：分區域 -> 乾坤統計) */}
+          {/* 視角 A：即時戰情室 (第一層：分單位 -> 第二層：分區域(按數字小到大) -> 乾坤統計) */}
           {/* ========================================== */}
           {view === "dashboard" && (
             <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 space-y-6">
@@ -706,7 +751,6 @@
                   </div>
                 </div>
 
-                {/* 匯入/匯出與壓測控制區 (受管理員密碼保護) */}
                 <div className="col-span-2 lg:col-span-1 bg-slate-800/90 border border-slate-700 rounded-xl p-3 flex flex-col justify-between gap-2">
                   <button
                     onClick={runConcurrencyTest}
@@ -825,13 +869,16 @@
                 </div>
               </section>
 
-              {/* 第二層：各「區域」即時紅綠燈矩陣 */}
+              {/* 第二層：各「區域」即時紅綠燈矩陣 (已按數字由小到大 001區 -> 015區 -> 030區 自動排序) */}
               <section>
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                   <div className="flex items-center gap-2">
                     <h2 className="text-base font-bold text-white">
                       📍 第二層：各【區域】即時出席狀況 {selectedUnit !== "ALL" && `（${selectedUnit}）`}
                     </h2>
+                    <span className="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-sky-300 border border-slate-700">
+                      已按區域數字由小到大排序
+                    </span>
                     {selectedRegion !== "ALL" && (
                       <button
                         onClick={() => setSelectedRegion("ALL")}
@@ -954,7 +1001,7 @@
 
                   <input
                     type="text"
-                    placeholder="搜尋 memberId、編號、求道名、單位、區域..."
+                    placeholder="搜尋 memberId、編號、求道名、單位、001區..."
                     value={searchKeyword}
                     onChange={e => setSearchKeyword(e.target.value)}
                     className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 w-full sm:w-72"
@@ -970,7 +1017,7 @@
                         <th className="py-2.5 px-3">編號</th>
                         <th className="py-2.5 px-3">求道名</th>
                         <th className="py-2.5 px-3">單位</th>
-                        <th className="py-2.5 px-3">區域</th>
+                        <th className="py-2.5 px-3">區域 (小到大)</th>
                         <th className="py-2.5 px-3">出席狀態 / 時間</th>
                         <th className="py-2.5 px-3 text-right">幹部快速代簽 {isAdminUnlocked ? "🔓" : "🔒"}</th>
                       </tr>
@@ -993,7 +1040,7 @@
                             <td className="py-2 px-3 font-mono text-xs text-amber-300">{p.code}</td>
                             <td className="py-2 px-3 font-bold text-white">{p.name}</td>
                             <td className="py-2 px-3 text-emerald-300 font-medium">{p.unit}</td>
-                            <td className="py-2 px-3 text-slate-300">{p.region}</td>
+                            <td className="py-2 px-3 font-mono text-sky-300 font-semibold">{p.region}</td>
                             <td className="py-2 px-3">
                               {st === "present" && (
                                 <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
@@ -1092,7 +1139,7 @@
                                   </span>
                                 </div>
                                 <div className="text-xs text-slate-400 mt-0.5">
-                                  <b className="text-emerald-300">{item.unit}</b> / {item.region} ｜ {item.gender} ｜ {item.memberId}
+                                  <b className="text-emerald-300">{item.unit}</b> / <b className="text-sky-300">{item.region}</b> ｜ {item.gender} ｜ {item.memberId}
                                 </div>
                               </div>
                               <span className={`text-xs font-bold px-2 py-1 rounded ${
